@@ -1,0 +1,482 @@
+---
+title: "HOMEWORK 15 - MH ALGORITHM FOR LOGISTIC REGRESSION"
+author: "Szczurek, Santini, Tito"
+format: 
+ html:
+  self-contained-math: true
+  embed-resources: true 
+  theme: 
+   light: flatly
+   dark: darkly
+  toc: true
+  toc-depth: 4
+  toc-expand: true
+  toc-location: right
+  smooth-scroll: true
+---
+
+## Introduction
+
+The purpose of the analysis is to estimate the posterior distribution of the $\beta$ parameters of a logistic regression model using a Bayesian approach.
+
+We have binary data $y_i \in \{0, 1\}$ and wish to determine the full distribution of $\beta$ given the data, which is useful for analyzing the main statistics.
+
+The problem is that in a logistic model, the posterior does not have a closed analytical form and is not a known distribution; therefore, we cannot sample from it directly (we don't have a conjugate prior).
+
+The solution is to use the Metropolis-Hastings (MH) algorithm: by constructing a Markov chain that converges to that posterior, we use the generated samples to approximate it.
+
+## The Logistic Regression Model
+
+The logistic regression model assumes that the probability of success for observation $i$ is:
+
+$$p_i = P(y_i = 1 \mid \mathbf{x}_i, \boldsymbol{\beta}) = \frac{e^{\mathbf{x}_i' \boldsymbol{\beta}}}{1 + e^{\mathbf{x}_i' \boldsymbol{\beta}}}$$
+
+```{r}
+#| message: false
+#| warning: false
+library(mvtnorm)
+library(LaplacesDemon)
+
+#data generation 
+set.seed(123)
+n <- 100
+X <- cbind(1, rnorm(n), rnorm(n))
+be0 <- c(0, 1, -1)
+
+eta <- X %*% be0 #predictor
+p_prob <- exp(eta) / (1 + exp(eta))
+y <- rbinom(n, 1, p_prob)
+```
+
+## Bayesian Setup
+
+We assume a normal prior distribution
+
+$$\boldsymbol{\beta} \sim MVN(\mu,\tau^2 \boldsymbol{I})$$ with $\mu = 0$.
+
+By Bayes' theorem the posterior is:
+
+$$\pi(\boldsymbol{\beta} \mid \mathbf{y}, \mathbf{X}) \propto L(\boldsymbol{\beta} \mid \mathbf{y}, \mathbf{X}) \pi(\boldsymbol{\beta})$$
+
+Where the likelihood is:
+
+$L(\boldsymbol{\beta} \mid \mathbf{y}, \mathbf{X}) = \prod_{i=1}^{n} p_i^{y_i}(1-p_i)^{1-y_i}$
+
+The posterior distribution lacks a closed-form solution; therefore, direct sampling is not possible.
+
+```{r}
+#setup
+R      <- 20000
+mu     <- rep(0, 3)
+La_inv <- diag(10, 3)
+```
+
+## Metropolis-Hastings algorithm
+
+To overcome this issue, we use the MH algorithm with a symmetric Normal proposal distribution centered on the *current* value of the parameters:
+
+$$\boldsymbol{\beta}^* \sim \mathcal{N}\!\left(\boldsymbol{\beta}^{(h-1)},\, \tilde{\tau}^2 \mathbf{I}\right), \quad \text{with } \tilde{\tau}^2 = \frac{\tau^2}{k}, \quad k \geq 1$$
+
+Because the proposal distribution is symmetric, we can use the "First Simplification" Rule and the acceptance probability simplifies to:
+
+$$\alpha\!\left(\boldsymbol{\beta}^* \mid \boldsymbol{\beta}^{(h-1)}\right) = \min\!\left\{1,\, \frac{\pi(\boldsymbol{\beta}^*)P(\mathbf{y} \mid \boldsymbol{\beta}^*)}{\pi(\boldsymbol{\beta}^{(h-1)})P(\mathbf{y} \mid \boldsymbol{\beta}^{(h-1)})}\right\}$$
+
+## MH steps
+
+1)  Start with an initial guess $\beta$ that will become negligible.
+
+2)  Propose: for iteration t, generate a candidate $\boldsymbol{\beta}^*$ from the proposal distribution
+
+$$\boldsymbol{\beta}^* \sim \mathcal{N}\!\left(\boldsymbol{\beta}^{(h-1)},\, \tilde{\tau}^2 \mathbf{I}\right)$$
+
+3)  Calculate acceptance probability $\alpha$
+
+4)  Decide whether to accept or not accept running a Bernoulli experiment and compare the uniform number generated with the probability of success ($\alpha$).
+
+## MH function
+
+To avoid code duplication across the three cases, we define a single reusable function that implements the MH algorithm. Each case will call this function with different hyperparameters and starting points.
+
+```{r}
+mh_run <- function(start, R, mu, La_inv, Lak, X, y) {
+  acc    <- 0
+  Be     <- matrix(0, R, 3)
+  be_cur <- start
+
+  for(h in 1:R) {
+    bes <- as.vector(rmvnorm(1, be_cur, Lak))
+
+    lnum <- dmvnorm(bes, mu, La_inv, log = TRUE) +
+            sum(dbinom(y, 1, exp(X %*% bes) / (1 + exp(X %*% bes)), log = TRUE))
+
+    lden <- dmvnorm(be_cur, mu, La_inv, log = TRUE) +
+            sum(dbinom(y, 1, exp(X %*% be_cur) / (1 + exp(X %*% be_cur)), log = TRUE))
+
+    al <- min(1, exp(lnum - lden))
+
+    if(runif(1) <= al){
+      be_cur <- bes
+      acc    <- acc + 1
+    }
+    Be[h, ] <- be_cur
+  }
+  list(Be = Be, acc_rate = acc / R)
+}
+```
+
+# **MH algorithm - First case**
+
+We use ML estimates as starting point and set $k = 50$.
+
+```{r}
+#setup
+k1   <- 50
+Lak1 <- diag(3) / k1
+
+#starting point: ML estimates
+set.seed(26)
+start1  <- as.vector(glm(y ~ X - 1, family = binomial)$coefficients)
+chain1  <- mh_run(start1, R, mu, La_inv, Lak1, X, y)
+
+#output
+acc_rate1 <- chain1$acc_rate
+Be1       <- chain1$Be
+mue1      <- colMeans(Be1[-(1:round(R / 4)), ])
+cov_e1    <- cov(Be1[-(1:round(R / 4)), ])
+
+print(acc_rate1)
+print(cov_e1)
+```
+
+The acceptance rate is very high and not close to the optimal value (typically between 0.2 and 0.3). Intermediate values for the acceptance rate are preferable because a rate that is too high—as seen in this case—indicates that the algorithm takes very small steps within the parameter space, leading to slow exploration of the posterior distribution.
+
+If we analyze the output `print(cov_e1)`, we observe the variance-covariance matrix of the $\beta$ parameters. The diagonal elements measure the posterior variance of each $\beta_j$, representing the uncertainty of the estimate. The off-diagonal elements are close to zero, suggesting that the parameters are approximately uncorrelated a posteriori.
+
+```{r}
+#comparison table
+comparison1 <- data.frame(
+  Parameter  = c("Intercept (Beta_0)", "Beta_1", "Beta_2"),
+  True_value = be0,
+  MCMC       = round(mue1, 4)
+); comparison1
+```
+
+The MCMC estimates differ slightly from the true parameter values. This is expected and can be attributed to the low efficiency of the chain — the high autocorrelation reduces the effective number of independent samples, leading to less precise posterior estimates.
+
+For these reasons, a graphical inspection is essential to verify if the algorithm covers the posterior distribution or shows a trend that suggests a lack of convergence.
+
+## Graphical diagnostics
+
+### Trace Plots
+
+```{r}
+for(j in 1:3){
+  plot(Be1[,j], type = "l", main = paste("Beta", j-1, "- First case"), 
+       xlab = "Iteration", ylab = bquote(italic(beta[.(j-1)]))) 
+  abline(h = be0[j], col = "red", lwd = 3)            
+}
+```
+
+All three chains exhibit the typical random appearance, indicating good mixing of the chain.
+
+No trends are observed throughout the 20000 iterations. Furthermore, there are no flat regions, which would otherwise indicate zones of rejection.
+
+This suggests that the algorithm has reached convergence and is correctly exploring the region of the posterior distribution.
+
+The chains oscillate stably around a central value, confirming that the stationary distribution has been reached.
+
+Despite the high acceptance rate, the algorithm appears to converge quite well and in just a few steps.
+
+### Autocorrelation plot
+
+```{r}
+for(j in 1:3){
+  acf(Be1[,j], main = paste("ACF Beta", j-1, "- First Case"), xlab = "Lag")
+}
+```
+
+In all three plots it is observed that the autocorrelation decreases very slowly toward zero as the number of the lags increases.
+
+Such persistent autocorrelation indicates that each value generated by the chain is highly dependent on the previous one. This is a direct consequence of the high acceptance rate ($0.6866$) and the fact that the algorithm takes very small steps within the parameter space.
+
+If the autocorrelation is strong, the algorithm is not very efficient.
+
+### Effective Sample Size
+
+```{r}
+ESS_vals1 <- ESS(Be1[-(1:round(R / 4)), ]); ESS_vals1
+```
+
+As we know, the ESS (Effective Sample Size) is used to check the efficiency of the chain. It represents the number of independent samples that contain the same amount of information as the chain of 20000 correlated iterations.
+
+An ESS value greater than 1000 is generally enough for us to be satisfied with the analysis performed; however, in this case, the ESS value is much lower than the threshold for all three parameters. This indicates that the MH algorithm, with these specific settings, is not very efficient.
+
+This behavior can be corrected by adjusting the variance of the proposal distribution. Given that the proposal variance is:
+
+$$\tilde{\tau}^2 = \frac{\tau^2}{k}, \quad k \geq 1$$
+
+if we increase the proposal variance (decreasing $k$), we decrease the acceptance rate, improving mixing and ESS.
+
+```{r}
+R / ESS_vals1
+```
+
+The R/ESS ratios for the first case highlight significant inefficiencies in the Markov chain due to high autocorrelation.
+
+# **MH algorithm - Second case**
+
+In the first case, $k=50$ produced a high acceptance rate and low ESS, indicating small steps and high autocorrelation. To improve convergence, we decrease $k$, which increases the proposal variance $\tilde{\tau}^2 = \tau^2 / k$, forcing the algorithm to take larger steps and explore the posterior more efficiently.
+
+```{r}
+#setup
+k2   <- 4
+Lak2 <- diag(3) / k2
+
+#starting point: ML estimates
+set.seed(26)
+start2 <- as.vector(glm(y ~ X - 1, family = binomial)$coefficients)
+chain2 <- mh_run(start2, R, mu, La_inv, Lak2, X, y)
+
+#output
+acc_rate2 <- chain2$acc_rate
+Be2       <- chain2$Be
+mue2      <- colMeans(Be2[-(1:round(R / 4)), ])
+cov_e2    <- cov(Be2[-(1:round(R / 4)), ])
+
+print(acc_rate2)
+```
+
+By decreasing `k` from 50 to 4, the proposal variance increases and the algorithm takes larger steps. This results in a lower acceptance rate, which is closer to the optimal range (0.2 - 0.3).
+
+```{r}
+print(cov_e2)
+```
+
+The diagonal elements of the posterior covariance matrix are small, indicating that the posterior distribution is concentrated around the estimated means. The off-diagonal elements are also close to zero, suggesting approximate independence between the parameters a posteriori.
+
+```{r}
+#comparison table - second case
+comparison2 <- data.frame(
+  Parameter  = c("Intercept (Beta_0)", "Beta_1", "Beta_2"),
+  True_value = be0,
+  MCMC       = round(mue2, 4)
+); comparison2
+```
+
+The results obtained with the implementation of the MH algorithm are quite close to the true values. This suggests that the algorithm correctly explores the posterior distribution.
+
+## Graphical diagnostics
+
+### Trace Plots
+
+```{r}
+for(j in 1:3){
+  plot(Be2[,j], type = "l", main = paste("Beta", j-1, "- Second case"),
+       xlab = "Iteration", ylab = bquote(italic(beta[.(j-1)])))
+  abline(h = be0[j], col = "red", lwd = 3)
+}
+```
+
+Compared to the first case, the chains now exhibit wider oscillations around the true parameter values, which is a direct consequence of the larger proposal variance. The chains still show good mixing with no visible trend, confirming convergence. The larger steps allow the algorithm to explore the posterior distribution more efficiently.
+
+### Autocorrelation plot
+
+```{r}
+for(j in 1:3){
+  acf(Be2[,j], main = paste("ACF Beta", j-1, "- Second case"), xlab = "Lag")
+}
+```
+
+With `k = 4`, the autocorrelation decreases much faster toward zero compared to the first case. This confirms that the chain mixes better and consecutive samples are less dependent on each other, which is a sign of a more efficient algorithm.
+
+### Effective Sample Size
+
+```{r}
+ESS_vals2 <- ESS(Be2[-(1:round(R / 4)), ]); ESS_vals2
+```
+
+All three parameters $\beta_0, \beta_1, \beta_2$ have exceeded the critical threshold of 1000. This indicates that the chain has generated an amount of information equivalent to over 1000 independent samples, making the posterior distribution estimates statistically reliable.
+
+## Comparison between the two cases
+
+```{r}
+comparison_k <- data.frame(
+  Case      = c("k = 50", "k = 4"),
+  Acc_rate  = round(c(acc_rate1, acc_rate2), 4),
+  ESS_beta0 = round(c(ESS_vals1[1], ESS_vals2[1]), 1),
+  ESS_beta1 = round(c(ESS_vals1[2], ESS_vals2[2]), 1),
+  ESS_beta2 = round(c(ESS_vals1[3], ESS_vals2[3]), 1)
+); comparison_k
+```
+
+The comparison table clearly shows the effect of the tuning parameter `k` on the algorithm performance. Decreasing `k` from 50 to 4 increases the proposal variance, which leads to a lower acceptance rate and a higher ESS, indicating a more efficient chain with less autocorrelation.
+
+```{r}
+R / ESS_vals2
+```
+
+The R/ESS ratios for the second case demonstrate a significant improvement in computational efficiency compared to the first case. With $k=4$, the chain requires fewer iterations to produce the equivalent of one independent sample. This reduction confirms that increasing the proposal variance effectively lowered the autocorrelation and enhanced the mixing of the chain.
+
+# **MH algorithm - Third case**
+
+In the final case, we look at how different starting points affect the results. In particular, we compare a starting point sampled from the prior distribution with an extreme starting point far from the true parameter values, to assess robustness of convergence with respect to initialization.
+
+```{r}
+#starting point 1: sampled from the prior distribution assumed in the model
+set.seed(26)
+start_prior <- as.vector(rmvnorm(1, mu, La_inv))
+
+#starting point 2: far from truth
+start_far <- c(5, 5, 5)
+
+###
+set.seed(26)
+chain_prior <- mh_run(start_prior, R, mu, La_inv, Lak2, X, y)
+set.seed(26)
+chain_far   <- mh_run(start_far,   R, mu, La_inv, Lak2, X, y)
+
+cat("Acceptance rate - Prior start:", round(chain_prior$acc_rate, 4), "\n")
+cat("Acceptance rate - Far start:",   round(chain_far$acc_rate,   4), "\n")
+```
+
+Both chains achieve an acceptance rate of approximately 0.21, within the optimal range of ${0.2-0.3}$, confirming that the choice of $k=4$ is appropriate regardless of the starting point.
+
+## Graphical diagnostics
+
+### Trace Plots
+
+```{r}
+for(j in 1:3){
+  ylim_range <- range(c(chain_prior$Be[,j], chain_far$Be[,j]))
+  
+  plot(1:R, chain_prior$Be[,j], type = "l", col = "darkblue",
+       ylim = ylim_range,
+       main = paste("Beta", j-1, "- Third Case"),
+       xlab = "Iteration", ylab = bquote(italic(beta[.(j-1)])))
+  lines(1:R, chain_far$Be[,j], col = "lightblue")
+  abline(h = be0[j], col = "red", lty = 1, lwd = 2)
+  legend("topright",
+         legend = c("Start: Prior", "Start: c(5,5,5)", "True value"),
+         col    = c("darkblue", "lightblue", "red"), lty = 1)
+}
+```
+
+Both chains converge to the same region of the posterior distribution regardless of their starting point. The chain starting from $c(5,5,5)$ shows a short burn-in phase in the initial iterations before stabilizing, while the chain starting from the prior converges immediately. After the burn-in, the two chains are indistinguishable, confirming the robustness of the algorithm.
+
+### Autocorrelation plot
+
+```{r}
+#prior start
+for(j in 1:3){
+  acf(chain_prior$Be[,j], main = paste("ACF Beta", j-1, "- Prior start"))
+}
+
+#far start
+for(j in 1:3){
+  acf(chain_far$Be[,j], main = paste("ACF Beta", j-1, "- Far start"))
+}
+```
+
+The autocorrelation structure is similar for both starting points, confirming that convergence is not affected by initialization. For all three parameters, autocorrelation decays rapidly toward zero, consistent with the efficient mixing observed in the trace plots.
+
+### Effective Sample Size
+
+```{r}
+ESS_prior <- ESS(chain_prior$Be[-(1:round(R / 4)), ])
+ESS_far   <- ESS(chain_far$Be[-(1:round(R / 4)),   ])
+
+comparison3 <- data.frame(
+  Start     = c("Prior", "Far values"),
+  Acc_rate  = round(c(chain_prior$acc_rate, chain_far$acc_rate), 4),
+  ESS_beta0 = round(c(ESS_prior[1], ESS_far[1]), 1),
+  ESS_beta1 = round(c(ESS_prior[2], ESS_far[2]), 1),
+  ESS_beta2 = round(c(ESS_prior[3], ESS_far[3]), 1)
+); comparison3
+```
+
+Both chains achieve ESS values above 1000 for all parameters, confirming that the choice of starting point does not affect the efficiency of the algorithm. The burn-in period effectively removes the influence of initialization, and the MH algorithm is robust to the choice of starting point.
+
+```{r}
+R / ESS_prior
+R / ESS_far
+```
+
+The R/ESS ratios are consistent across the two starting points, confirming that once the chain reaches the stationary distribution, its efficiency depends on the proposal variance — not on the initialization.
+
+# **MH algorithm - Fourth case**
+
+In this case we investigate the effect of a larger sample size on the posterior distribution. We change the parameters setting $k = 30$ and keeping the same $R$ and regenerate the data with $n = 550$ instead of $n = 100$. A larger sample size provides more information to the likelihood, which should dominate the prior and lead to a more concentrated posterior distribution with estimates closer to the true values.
+
+```{r}
+set.seed(26)
+n4      <- 550
+X4      <- cbind(1, rnorm(n4), rnorm(n4))
+eta4    <- X4 %*% be0
+p_prob4 <- exp(eta4) / (1 + exp(eta4))
+y4      <- rbinom(n4, 1, p_prob4)
+
+#MH algorithm
+k4   <- 30
+Lak4 <- diag(3) / k4
+set.seed(26)
+start4 <- as.vector(glm(y4 ~ X4 - 1, family = binomial)$coefficients)
+chain4 <- mh_run(start4, R, mu, La_inv, Lak4, X4, y4)
+
+#output
+acc_rate4 <- chain4$acc_rate
+Be4       <- chain4$Be
+mue4      <- colMeans(Be4[-(1:round(R / 4)), ])
+cov_e4    <- cov(Be4[-(1:round(R / 4)), ])
+
+print(acc_rate4)
+print(cov_e4)
+```
+
+```{r}
+# comparison table
+comparison4 <- data.frame(
+  Parameter  = c("Intercept (Beta_0)", "Beta_1", "Beta_2"),
+  True_value = be0,
+  MCMC_n100  = round(mue2, 4),
+  MCMC_n550  = round(mue4, 4)
+); comparison4
+```
+
+With $n = 550$, the MCMC estimates are considerably closer to the true parameter values compared to the Second Case with $n = 100$. This is a direct consequence of the larger sample size: more observations provide more information to the likelihood, which dominates the prior and pulls the posterior toward the true values.
+
+## Graphical diagnostics
+
+### Trace Plots
+
+```{r}
+for(j in 1:3){
+  plot(Be4[,j], type = "l", main = paste("Beta", j-1, "- Fourth case"),
+       xlab = "Iteration", ylab = bquote(italic(beta[.(j-1)])))
+  abline(h = be0[j], col = "red", lwd = 2)
+}
+```
+
+The chains show good mixing and converge quickly to the true parameter values. Compared to the Second Case, the oscillations are narrower — reflecting the more concentrated posterior distribution that results from the larger sample size.
+
+### Autocorrelation plot
+
+```{r}
+for(j in 1:3){
+  acf(Be4[,j], main = paste("ACF Beta", j-1, "- Fourth case"), xlab = "Lag")
+}
+```
+
+The autocorrelation structure is similar to the Second Case, confirming that the choice of $k = 4$ remains appropriate even with a larger sample size.
+
+### Effective Sample Size
+
+```{r}
+ESS_vals4 <- ESS(Be4[-(1:round(R / 4)), ]); ESS_vals4
+```
+
+The ESS values show significant improvement compared to the previous cases.
+
+```{r}
+R / ESS_vals4
+```
+
